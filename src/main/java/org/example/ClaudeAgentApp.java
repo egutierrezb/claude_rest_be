@@ -68,7 +68,7 @@ public class ClaudeAgentApp {
         }
 
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, errorJson("Only POST is supported"));
+            sendJson(exchange, 405, errorJson("Only POST method is supported"));
             return;
         }
 
@@ -108,7 +108,6 @@ public class ClaudeAgentApp {
             sendJson(exchange, 200, GSON.toJson(responseJson));
         } catch (Exception e) {
             System.err.println("Error calling Claude API: " + e.getMessage());
-            e.printStackTrace();
             sendJson(exchange, 500, errorJson("Error calling Claude API: " + e.getMessage()));
         }
     }
