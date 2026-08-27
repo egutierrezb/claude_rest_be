@@ -2,6 +2,8 @@ package org.example;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.core.JsonValue;
+import com.anthropic.core.http.Headers;
+import com.anthropic.errors.UnauthorizedException;
 import com.anthropic.models.messages.ContentBlock;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -25,8 +28,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -174,6 +180,56 @@ class ClaudeAgentAppTest {
         assertEquals(500, response.statusCode());
         assertTrue(errorOf(response).contains("rate limited"),
                 "expected the SDK failure in the error payload, got: " + errorOf(response));
+    }
+
+    @Test
+    @DisplayName("A rejected credential is reported as 503, not as a generic 500")
+    void rejectedCredentialsReturn503() throws Exception {
+        when(messageService.create(any(MessageCreateParams.class)))
+                .thenThrow(UnauthorizedException.builder()
+                        .headers(Headers.builder().build())
+                        .body(JsonValue.from(Map.of("error", Map.of("message", "x-api-key header is required"))))
+                        .build());
+
+        HttpResponse<String> response = post("{\"question\": \"hola\"}");
+
+        assertEquals(503, response.statusCode());
+        assertEquals(ClaudeAgentApp.REJECTED_CREDENTIALS_MESSAGE, errorOf(response));
+    }
+
+    @Test
+    @DisplayName("ANTHROPIC_API_KEY is reported as the credential source when set")
+    void apiKeyIsResolved() {
+        assertEquals(Optional.of("ANTHROPIC_API_KEY"),
+                ClaudeAgentApp.resolveCredentialSource(
+                        name -> "ANTHROPIC_API_KEY".equals(name) ? "sk-ant-test" : null,
+                        Path.of("/nonexistent")));
+    }
+
+    @Test
+    @DisplayName("An OAuth profile counts as a credential when no env var is set")
+    void oauthProfileIsResolved(@TempDir Path configDir) throws Exception {
+        Files.createDirectory(configDir.resolve("credentials"));
+        Files.writeString(configDir.resolve("credentials").resolve("default.json"), "{}");
+
+        assertTrue(ClaudeAgentApp.resolveCredentialSource(name -> null, configDir)
+                .orElse("").startsWith("OAuth profile in "));
+    }
+
+    @Test
+    @DisplayName("A blank env var does not count as a credential")
+    void blankEnvVarIsNotACredential() {
+        assertEquals(Optional.empty(),
+                ClaudeAgentApp.resolveCredentialSource(name -> "  ", Path.of("/nonexistent")));
+    }
+
+    @Test
+    @DisplayName("An empty credentials directory does not count as a credential")
+    void emptyCredentialsDirIsNotACredential(@TempDir Path configDir) throws Exception {
+        Files.createDirectory(configDir.resolve("credentials"));
+
+        assertEquals(Optional.empty(),
+                ClaudeAgentApp.resolveCredentialSource(name -> null, configDir));
     }
 
     @Test
