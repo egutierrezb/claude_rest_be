@@ -9,6 +9,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -32,6 +34,8 @@ public class ClaudeAgentApp {
     // Kept from the original sample as a reference for quick manual testing.
     public static String[] REQUEST1 = {"Cual es tu carro favorito?", "Cual es tu programa de TV favorito"};
 
+    private static final Logger LOG = LoggerFactory.getLogger(ClaudeAgentApp.class);
+
     private static final Gson GSON = new Gson();
 
     public static void main(String[] args) throws IOException {
@@ -41,8 +45,8 @@ public class ClaudeAgentApp {
         int port = 4567;
         HttpServer server = createServer(port, client);
         server.start();
-        System.out.println("Claude backend listening on http://localhost:" + port);
-        System.out.println("POST a question to http://localhost:" + port + "/api/ask");
+        LOG.info("Claude backend listening on http://localhost:{}", port);
+        LOG.info("POST a question to http://localhost:{}/api/ask", port);
     }
 
     /**
@@ -68,7 +72,7 @@ public class ClaudeAgentApp {
         }
 
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, errorJson("Only POST is supported"));
+            sendJson(exchange, 405, errorJson("Only POST method is supported"));
             return;
         }
 
@@ -84,7 +88,7 @@ public class ClaudeAgentApp {
                 return;
             }
 
-            System.out.println("Claude Question: " + question);
+            LOG.info("Claude Question: {}", question);
 
             // 2. Build the request parameters
             MessageCreateParams params = MessageCreateParams.builder()
@@ -101,14 +105,13 @@ public class ClaudeAgentApp {
             message.content().forEach(contentBlock ->
                     contentBlock.text().ifPresent(text -> answer.append(text.text())));
 
-            System.out.println("Claude Response: " + answer);
+            LOG.info("Claude Response: {}", answer);
 
             JsonObject responseJson = new JsonObject();
             responseJson.addProperty("answer", answer.toString());
             sendJson(exchange, 200, GSON.toJson(responseJson));
         } catch (Exception e) {
-            System.err.println("Error calling Claude API: " + e.getMessage());
-            e.printStackTrace();
+            LOG.error("Error calling Claude API", e);
             sendJson(exchange, 500, errorJson("Error calling Claude API: " + e.getMessage()));
         }
     }

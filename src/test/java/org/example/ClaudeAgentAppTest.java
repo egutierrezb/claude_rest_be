@@ -184,7 +184,7 @@ class ClaudeAgentAppTest {
                 HttpResponse.BodyHandlers.ofString());
 
         assertEquals(405, response.statusCode());
-        assertEquals("Only POST is supported", errorOf(response));
+        assertEquals("Only POST method is supported", errorOf(response));
         verify(messageService, never()).create(any(MessageCreateParams.class));
     }
 
