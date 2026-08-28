@@ -16,11 +16,20 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -43,6 +52,21 @@ public class ClaudeAgentApp {
     private static final Logger LOG = LoggerFactory.getLogger(ClaudeAgentApp.class);
 
     private static final Gson GSON = new Gson();
+
+    /** Shared client for the outbound YouTube lookups behind {@code /api/video}. */
+    private static final HttpClient HTTP = HttpClient.newBuilder()
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
+
+    /** First {@code "videoId":"XXXXXXXXXXX"} in a YouTube results page is the top hit. */
+    private static final Pattern VIDEO_ID = Pattern.compile("\"videoId\":\"([\\w-]{11})\"");
+
+    /** {@code sp} filter that restricts a YouTube search to videos only. */
+    private static final String YT_VIDEOS_ONLY = "EgIQAQ%3D%3D";
+
+    private static final String BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
     static final String API_KEY_ENV = "ANTHROPIC_API_KEY";
     static final String AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN";
@@ -129,6 +153,7 @@ public class ClaudeAgentApp {
     static HttpServer createServer(int port, AnthropicClient client) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/ask", exchange -> handleAsk(exchange, client));
+        server.createContext("/api/video", ClaudeAgentApp::handleVideo);
         server.setExecutor(null); // default executor
         return server;
     }
@@ -192,6 +217,116 @@ public class ClaudeAgentApp {
             LOG.error("Error calling Claude API", e);
             sendJson(exchange, 500, errorJson("Error calling Claude API: " + e.getMessage()));
         }
+    }
+
+    /**
+     * GET /api/video?q=... — resolves the top YouTube video for a query and returns
+     * {@code {"videoId": "...", "title": "...", "author": "..."}}. Used by the frontend
+     * to embed a playable clip next to Claude's answer. No API key: it reads the public
+     * search-results page and grabs the first video id, then oEmbed for the title.
+     */
+    private static void handleVideo(HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, OPTIONS");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type");
+
+        if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(204, -1);
+            return;
+        }
+
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, errorJson("Only GET method is supported"));
+            return;
+        }
+
+        String query = queryParam(exchange.getRequestURI().getRawQuery(), "q");
+        if (query == null || query.isBlank()) {
+            sendJson(exchange, 400, errorJson("Missing 'q' query parameter"));
+            return;
+        }
+
+        LOG.info("YouTube lookup: {}", query);
+
+        try {
+            Optional<String> videoId = searchYouTube(query);
+            if (videoId.isEmpty()) {
+                sendJson(exchange, 404, errorJson("No video found for that query"));
+                return;
+            }
+
+            JsonObject responseJson = new JsonObject();
+            responseJson.addProperty("videoId", videoId.get());
+            fetchOembed(videoId.get()).ifPresent(meta -> {
+                if (meta.has("title")) {
+                    responseJson.addProperty("title", meta.get("title").getAsString());
+                }
+                if (meta.has("author_name")) {
+                    responseJson.addProperty("author", meta.get("author_name").getAsString());
+                }
+            });
+
+            LOG.info("YouTube lookup resolved to videoId {}", videoId.get());
+            sendJson(exchange, 200, GSON.toJson(responseJson));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            sendJson(exchange, 502, errorJson("YouTube lookup was interrupted"));
+        } catch (Exception e) {
+            LOG.error("YouTube lookup failed for query: {}", query, e);
+            sendJson(exchange, 502, errorJson("YouTube lookup failed: " + e.getMessage()));
+        }
+    }
+
+    /** Reads the public results page for {@code query} and returns the first video id. */
+    private static Optional<String> searchYouTube(String query) throws IOException, InterruptedException {
+        String url = "https://www.youtube.com/results?search_query="
+                + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&sp=" + YT_VIDEOS_ONLY;
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .header("User-Agent", BROWSER_UA)
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        Matcher matcher = VIDEO_ID.matcher(response.body());
+        return matcher.find() ? Optional.of(matcher.group(1)) : Optional.empty();
+    }
+
+    /** Best-effort title/author for a video id via YouTube's public oEmbed endpoint. */
+    private static Optional<JsonObject> fetchOembed(String videoId) {
+        try {
+            String url = "https://www.youtube.com/oembed?format=json&url="
+                    + URLEncoder.encode("https://www.youtube.com/watch?v=" + videoId, StandardCharsets.UTF_8);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(Duration.ofSeconds(10))
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return Optional.ofNullable(GSON.fromJson(response.body(), JsonObject.class));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            LOG.warn("Could not fetch oEmbed metadata for {}", videoId, e);
+        }
+        return Optional.empty();
+    }
+
+    /** Pulls a single decoded parameter out of a raw (still URL-encoded) query string. */
+    private static String queryParam(String rawQuery, String key) {
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return null;
+        }
+        for (String pair : rawQuery.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0 && pair.substring(0, eq).equals(key)) {
+                return URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return null;
     }
 
     private static String errorJson(String message) {
