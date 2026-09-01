@@ -110,7 +110,7 @@ class ClaudeAgentAppTest {
         verify(messageService).create(captor.capture());
 
         MessageCreateParams params = captor.getValue();
-        assertEquals(Model.CLAUDE_OPUS_5, params.model());
+        assertEquals(Model.CLAUDE_SONNET_4_5, params.model());
         assertEquals(1024L, params.maxTokens());
         assertEquals(1, params.messages().size());
         assertTrue(params.messages().get(0).content().toString().contains("Cual es tu programa de TV favorito"));
@@ -194,7 +194,7 @@ class ClaudeAgentAppTest {
         HttpResponse<String> response = post("{\"question\": \"hola\"}");
 
         assertEquals(503, response.statusCode());
-        assertEquals(ClaudeAgentApp.REJECTED_CREDENTIALS_MESSAGE, errorOf(response));
+        assertEquals(ClaudeAgentConstants.REJECTED_CREDENTIALS_MESSAGE, errorOf(response));
     }
 
     @Test
