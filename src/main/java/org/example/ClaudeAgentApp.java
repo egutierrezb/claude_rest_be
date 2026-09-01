@@ -29,8 +29,16 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
+
+import static org.example.ClaudeAgentConstants.API_KEY_ENV;
+import static org.example.ClaudeAgentConstants.AUTH_TOKEN_ENV;
+import static org.example.ClaudeAgentConstants.BROWSER_UA;
+import static org.example.ClaudeAgentConstants.CONFIG_DIR_ENV;
+import static org.example.ClaudeAgentConstants.NO_CREDENTIALS_HELP;
+import static org.example.ClaudeAgentConstants.REJECTED_CREDENTIALS_MESSAGE;
+import static org.example.ClaudeAgentConstants.VIDEO_ID;
+import static org.example.ClaudeAgentConstants.YT_VIDEOS_ONLY;
 
 /**
  * Small HTTP wrapper around the Anthropic SDK so a React frontend can ask
@@ -46,9 +54,6 @@ import java.util.stream.Stream;
  */
 public class ClaudeAgentApp {
 
-    // Kept from the original sample as a reference for quick manual testing.
-    public static String[] REQUEST1 = {"Cual es tu carro favorito?", "Cual es tu programa de TV favorito"};
-
     private static final Logger LOG = LoggerFactory.getLogger(ClaudeAgentApp.class);
 
     private static final Gson GSON = new Gson();
@@ -58,35 +63,6 @@ public class ClaudeAgentApp {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .connectTimeout(Duration.ofSeconds(10))
             .build();
-
-    /** First {@code "videoId":"XXXXXXXXXXX"} in a YouTube results page is the top hit. */
-    private static final Pattern VIDEO_ID = Pattern.compile("\"videoId\":\"([\\w-]{11})\"");
-
-    /** {@code sp} filter that restricts a YouTube search to videos only. */
-    private static final String YT_VIDEOS_ONLY = "EgIQAQ%3D%3D";
-
-    private static final String BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
-
-    static final String API_KEY_ENV = "ANTHROPIC_API_KEY";
-    static final String AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN";
-    static final String CONFIG_DIR_ENV = "ANTHROPIC_CONFIG_DIR";
-
-    static final String NO_CREDENTIALS_HELP = """
-            No Anthropic credentials found. An API key is not the only option \
-            — the SDK resolves credentials in this order:
-              1. ANTHROPIC_API_KEY
-              2. ANTHROPIC_AUTH_TOKEN
-              3. an OAuth profile under ~/.config/anthropic, written by `ant auth login`
-            A Claude Pro or Max subscription authenticates through the OAuth profile:
-              brew install anthropics/tap/ant && ant auth login
-            Otherwise create an API key at https://console.anthropic.com/settings/keys \
-            and export it as ANTHROPIC_API_KEY.""";
-
-    /** Message returned to callers when Anthropic rejects whatever credential we did send. */
-    static final String REJECTED_CREDENTIALS_MESSAGE =
-            "The backend's Anthropic credentials were rejected. Check `ant auth status`, "
-                    + "or re-run `ant auth login` if the OAuth profile's refresh token expired.";
 
     public static void main(String[] args) throws IOException {
         // Refuse to start without a credential. fromEnv() happily builds a client when none is
@@ -190,7 +166,7 @@ public class ClaudeAgentApp {
 
             // 2. Build the request parameters
             MessageCreateParams params = MessageCreateParams.builder()
-                    .model(Model.CLAUDE_OPUS_5) // Or Model.CLAUDE_3_5_HAIKU
+                    .model(Model.CLAUDE_SONNET_4_5) // Or Model.CLAUDE_3_5_HAIKU
                     .maxTokens(1024L)
                     .addUserMessage(question)
                     .build();
