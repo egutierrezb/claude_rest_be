@@ -7,6 +7,7 @@ import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.Model;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -26,7 +27,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.stream.Stream;
@@ -195,11 +200,14 @@ public class ClaudeAgentApp {
         }
     }
 
+    /** Largest {@code count} the frontend's selector offers; also the hard cap here. */
+    private static final int MAX_VIDEOS = 10;
+
     /**
-     * GET /api/video?q=... — resolves the top YouTube video for a query and returns
-     * {@code {"videoId": "...", "title": "...", "author": "..."}}. Used by the frontend
-     * to embed a playable clip next to Claude's answer. No API key: it reads the public
-     * search-results page and grabs the first video id, then oEmbed for the title.
+     * GET /api/video?q=...&count=N — resolves the top N (1..10, default 1) YouTube videos
+     * for a query and returns {@code {"videos": [{"videoId","title","author"}, ...]}}. The
+     * frontend lists them and embeds whichever one the user picks. No API key: it reads the
+     * public search-results page and grabs video ids, then oEmbed for each title/author.
      */
     private static void handleVideo(HttpExchange exchange) throws IOException {
         exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
@@ -216,33 +224,38 @@ public class ClaudeAgentApp {
             return;
         }
 
-        String query = queryParam(exchange.getRequestURI().getRawQuery(), "q");
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        String query = queryParam(rawQuery, "q");
         if (query == null || query.isBlank()) {
             sendJson(exchange, 400, errorJson("Missing 'q' query parameter"));
             return;
         }
+        int count = clampCount(queryParam(rawQuery, "count"));
 
-        LOG.info("YouTube lookup: {}", query);
+        LOG.info("YouTube lookup: {} (count={})", query, count);
 
         try {
-            Optional<String> videoId = searchYouTube(query);
-            if (videoId.isEmpty()) {
+            List<String> videoIds = searchYouTube(query, count);
+            if (videoIds.isEmpty()) {
                 sendJson(exchange, 404, errorJson("No video found for that query"));
                 return;
             }
 
-            JsonObject responseJson = new JsonObject();
-            responseJson.addProperty("videoId", videoId.get());
-            fetchOembed(videoId.get()).ifPresent(meta -> {
-                if (meta.has("title")) {
-                    responseJson.addProperty("title", meta.get("title").getAsString());
-                }
-                if (meta.has("author_name")) {
-                    responseJson.addProperty("author", meta.get("author_name").getAsString());
-                }
-            });
+            // oEmbed is one HTTP round-trip per id; fan them out so 10 videos don't
+            // cost 10x one lookup.
+            List<CompletableFuture<JsonObject>> pending = videoIds.stream()
+                    .map(id -> CompletableFuture.supplyAsync(() -> videoJson(id)))
+                    .toList();
 
-            LOG.info("YouTube lookup resolved to videoId {}", videoId.get());
+            JsonArray videos = new JsonArray();
+            for (CompletableFuture<JsonObject> future : pending) {
+                videos.add(future.join());
+            }
+
+            JsonObject responseJson = new JsonObject();
+            responseJson.add("videos", videos);
+
+            LOG.info("YouTube lookup resolved {} video(s)", videos.size());
             sendJson(exchange, 200, GSON.toJson(responseJson));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -253,8 +266,35 @@ public class ClaudeAgentApp {
         }
     }
 
-    /** Reads the public results page for {@code query} and returns the first video id. */
-    private static Optional<String> searchYouTube(String query) throws IOException, InterruptedException {
+    /** Parses {@code count}, clamping to 1..{@value #MAX_VIDEOS}; missing/garbage -> 1. */
+    private static int clampCount(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return 1;
+        }
+        try {
+            return Math.max(1, Math.min(MAX_VIDEOS, Integer.parseInt(raw.trim())));
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
+    /** {videoId, title, author} for one id, title/author best-effort via oEmbed. */
+    private static JsonObject videoJson(String videoId) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("videoId", videoId);
+        fetchOembed(videoId).ifPresent(meta -> {
+            if (meta.has("title")) {
+                obj.addProperty("title", meta.get("title").getAsString());
+            }
+            if (meta.has("author_name")) {
+                obj.addProperty("author", meta.get("author_name").getAsString());
+            }
+        });
+        return obj;
+    }
+
+    /** Reads the public results page for {@code query} and returns up to {@code limit} distinct video ids. */
+    private static List<String> searchYouTube(String query, int limit) throws IOException, InterruptedException {
         String url = "https://www.youtube.com/results?search_query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&sp=" + YT_VIDEOS_ONLY;
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
@@ -266,7 +306,11 @@ public class ClaudeAgentApp {
 
         HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
         Matcher matcher = VIDEO_ID.matcher(response.body());
-        return matcher.find() ? Optional.of(matcher.group(1)) : Optional.empty();
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        while (matcher.find() && ids.size() < limit) {
+            ids.add(matcher.group(1));
+        }
+        return new ArrayList<>(ids);
     }
 
     /** Best-effort title/author for a video id via YouTube's public oEmbed endpoint. */
