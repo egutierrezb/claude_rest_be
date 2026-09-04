@@ -295,7 +295,7 @@ public class ClaudeAgentApp {
 
     /** Reads the public results page for {@code query} and returns up to {@code limit} distinct video ids. */
     private static List<String> searchYouTube(String query, int limit) throws IOException, InterruptedException {
-        String url = "https://www.youtube.com/results?search_query="
+        String url = "https://www.youtube.com/@TuCochePorAlex/search?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&sp=" + YT_VIDEOS_ONLY;
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .header("User-Agent", BROWSER_UA)
