@@ -8,6 +8,7 @@ import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.Model;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -36,14 +37,7 @@ import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.stream.Stream;
 
-import static org.example.ClaudeAgentConstants.API_KEY_ENV;
-import static org.example.ClaudeAgentConstants.AUTH_TOKEN_ENV;
-import static org.example.ClaudeAgentConstants.BROWSER_UA;
-import static org.example.ClaudeAgentConstants.CONFIG_DIR_ENV;
-import static org.example.ClaudeAgentConstants.NO_CREDENTIALS_HELP;
-import static org.example.ClaudeAgentConstants.REJECTED_CREDENTIALS_MESSAGE;
-import static org.example.ClaudeAgentConstants.VIDEO_ID;
-import static org.example.ClaudeAgentConstants.YT_VIDEOS_ONLY;
+import static org.example.ClaudeAgentConstants.*;
 
 /**
  * Small HTTP wrapper around the Anthropic SDK so a React frontend can ask
@@ -135,6 +129,7 @@ public class ClaudeAgentApp {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/ask", exchange -> handleAsk(exchange, client));
         server.createContext("/api/video", ClaudeAgentApp::handleVideo);
+        server.createContext("/api/posts", ClaudeAgentApp::handlePosts);
         server.setExecutor(null); // default executor
         return server;
     }
@@ -235,7 +230,7 @@ public class ClaudeAgentApp {
         LOG.info("YouTube lookup: {} (count={})", query, count);
 
         try {
-            List<String> videoIds = searchYouTube(query, count);
+            List<String> videoIds = searchYouTubeTuCocheChannel(query, count);
             if (videoIds.isEmpty()) {
                 sendJson(exchange, 404, errorJson("No video found for that query"));
                 return;
@@ -294,8 +289,8 @@ public class ClaudeAgentApp {
     }
 
     /** Reads the public results page for {@code query} and returns up to {@code limit} distinct video ids. */
-    private static List<String> searchYouTube(String query, int limit) throws IOException, InterruptedException {
-        String url = "https://www.youtube.com/results?search_query="
+    private static List<String> searchYouTubeTuCocheChannel(String query, int limit) throws IOException, InterruptedException {
+        String url = "https://www.youtube.com/@TuCochePorAlex/search?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&sp=" + YT_VIDEOS_ONLY;
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .header("User-Agent", BROWSER_UA)
@@ -333,6 +328,101 @@ public class ClaudeAgentApp {
             LOG.warn("Could not fetch oEmbed metadata for {}", videoId, e);
         }
         return Optional.empty();
+    }
+
+    /**
+     * GET /api/posts?q=... — searches {@code @}{@value ClaudeAgentConstants#X_ACCOUNT_HANDLE}'s
+     * recent posts for the given car model through the X API v2 recent-search endpoint and returns
+     * {@code {"posts": [{"id","text","createdAt"}, ...]}}. Needs an app-only bearer token in
+     * {@value ClaudeAgentConstants#X_BEARER_TOKEN}; without one it answers 503.
+     */
+    private static void handlePosts(HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, OPTIONS");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type");
+
+        if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(204, -1);
+            return;
+        }
+
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, errorJson("Only GET method is supported"));
+            return;
+        }
+
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        String model = queryParam(rawQuery, "q");
+        if (model == null || model.isBlank()) {
+            sendJson(exchange, 400, errorJson("Missing 'q' query parameter"));
+            return;
+        }
+
+        String bearerToken = System.getenv(X_BEARER_TOKEN);
+        if (bearerToken == null || bearerToken.isBlank()) {
+            LOG.error("{} is not set; /api/posts cannot call the X API", X_BEARER_TOKEN);
+            sendJson(exchange, 503, errorJson(X_MISSING_TOKEN_MESSAGE));
+            return;
+        }
+
+        LOG.info("X lookup: posts from @{} about {}", X_ACCOUNT_HANDLE, model);
+
+        try {
+            JsonArray posts = searchXPosts(model.trim(), bearerToken);
+            JsonObject responseJson = new JsonObject();
+            responseJson.add("posts", posts);
+            LOG.info("X lookup resolved {} post(s)", posts.size());
+            sendJson(exchange, 200, GSON.toJson(responseJson));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            sendJson(exchange, 502, errorJson("X lookup was interrupted"));
+        } catch (Exception e) {
+            LOG.error("X lookup failed for model: {}", model, e);
+            sendJson(exchange, 502, errorJson("X lookup failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Calls the X recent-search endpoint for posts from {@link ClaudeAgentConstants#X_ACCOUNT_HANDLE}
+     * that mention {@code model} and maps each hit to {@code {id, text, createdAt}}. An empty array
+     * means the search matched nothing — recent-search omits {@code "data"} entirely in that case.
+     */
+    private static JsonArray searchXPosts(String model, String bearerToken)
+            throws IOException, InterruptedException {
+        String search = "from:" + X_ACCOUNT_HANDLE + " " + model;
+        String url = X_RECENT_SEARCH_URL
+                + "?query=" + URLEncoder.encode(search, StandardCharsets.UTF_8)
+                + "&max_results=" + X_MAX_POSTS
+                + "&tweet.fields=created_at";
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .header("Authorization", "Bearer " + bearerToken)
+                .header("Accept", "application/json")
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != 200) {
+            throw new IOException("X API returned HTTP " + response.statusCode() + ": " + response.body());
+        }
+
+        JsonObject payload = GSON.fromJson(response.body(), JsonObject.class);
+        JsonArray posts = new JsonArray();
+        if (payload == null || !payload.has("data") || !payload.get("data").isJsonArray()) {
+            return posts;
+        }
+        for (JsonElement element : payload.getAsJsonArray("data")) {
+            JsonObject tweet = element.getAsJsonObject();
+            JsonObject post = new JsonObject();
+            post.addProperty("id", tweet.get("id").getAsString());
+            post.addProperty("text", tweet.get("text").getAsString());
+            if (tweet.has("created_at")) {
+                post.addProperty("createdAt", tweet.get("created_at").getAsString());
+            }
+            posts.add(post);
+        }
+        return posts;
     }
 
     /** Pulls a single decoded parameter out of a raw (still URL-encoded) query string. */
