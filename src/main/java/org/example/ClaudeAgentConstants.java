@@ -28,6 +28,25 @@ final class ClaudeAgentConstants {
     static final String BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
+    // --- X (Twitter) lookup behind /api/posts ---
+
+    /** Account whose posts /api/posts searches; no leading @, as X's {@code from:} operator wants. */
+    static final String X_ACCOUNT_HANDLE = "tucoche_";
+
+    /** X API v2 recent-search endpoint — public posts from roughly the last 7 days. */
+    static final String X_RECENT_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent";
+
+    /** App-only bearer token for the X API; without it /api/posts cannot authenticate. */
+    static final String X_BEARER_TOKEN = "X_BEARER_TOKEN";
+
+    /** Recent-search accepts up to 100 per page; we only surface a handful. */
+    static final int X_MAX_POSTS = 10;
+
+    /** Returned to callers when {@link #X_BEARER_TOKEN} is not set. */
+    static final String X_MISSING_TOKEN_MESSAGE =
+            "The backend has no X API credentials. Create a project at "
+                    + "https://developer.x.com and export its bearer token as X_BEARER_TOKEN.";
+
     // --- Credential resolution ---
 
     static final String API_KEY_ENV = "ANTHROPIC_API_KEY";

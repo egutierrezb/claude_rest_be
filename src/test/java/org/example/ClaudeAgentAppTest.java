@@ -37,6 +37,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -62,6 +63,7 @@ class ClaudeAgentAppTest {
     private HttpServer server;
     private HttpClient httpClient;
     private URI askUri;
+    private URI postsUri;
 
     @BeforeEach
     void startServer() throws IOException {
@@ -72,7 +74,9 @@ class ClaudeAgentAppTest {
         server.start();
 
         httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-        askUri = URI.create("http://localhost:" + server.getAddress().getPort() + "/api/ask");
+        int port = server.getAddress().getPort();
+        askUri = URI.create("http://localhost:" + port + "/api/ask");
+        postsUri = URI.create("http://localhost:" + port + "/api/posts");
     }
 
     @AfterEach
@@ -242,6 +246,45 @@ class ClaudeAgentAppTest {
         assertEquals(405, response.statusCode());
         assertEquals("Only POST method is supported", errorOf(response));
         verify(messageService, never()).create(any(MessageCreateParams.class));
+    }
+
+    @Test
+    @DisplayName("GET /api/posts without a 'q' parameter returns 400")
+    void postsWithoutQueryReturns400() throws Exception {
+        HttpResponse<String> response = httpClient.send(
+                HttpRequest.newBuilder(postsUri).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(400, response.statusCode());
+        assertEquals("Missing 'q' query parameter", errorOf(response));
+    }
+
+    @Test
+    @DisplayName("Non-GET methods on /api/posts are rejected with 405")
+    void postsRejectNonGet() throws Exception {
+        HttpResponse<String> response = httpClient.send(
+                HttpRequest.newBuilder(postsUri)
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(405, response.statusCode());
+        assertEquals("Only GET method is supported", errorOf(response));
+    }
+
+    @Test
+    @DisplayName("GET /api/posts answers 503 when the X bearer token is not configured")
+    void postsWithoutTokenReturns503() throws Exception {
+        String token = System.getenv(ClaudeAgentConstants.X_BEARER_TOKEN);
+        assumeTrue(token == null || token.isBlank(),
+                "X_BEARER_TOKEN is set in this environment; skipping the missing-credential case");
+
+        HttpResponse<String> response = httpClient.send(
+                HttpRequest.newBuilder(postsUri.resolve("/api/posts?q=Nissan+Skyline")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(503, response.statusCode());
+        assertEquals(ClaudeAgentConstants.X_MISSING_TOKEN_MESSAGE, errorOf(response));
     }
 
     private HttpResponse<String> post(String body) throws Exception {
