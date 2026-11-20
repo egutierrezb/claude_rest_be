@@ -32,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -285,6 +286,70 @@ class ClaudeAgentAppTest {
 
         assertEquals(503, response.statusCode());
         assertEquals(ClaudeAgentConstants.X_MISSING_TOKEN_MESSAGE, errorOf(response));
+    }
+
+    @Test
+    @DisplayName("rankVideoIdsByRelevance pushes a channel's unrelated filler video to the back")
+    void rankVideoIdsByRelevancePrefersTitleMatches() {
+        // Shape captured from a real @TuCochePorAlex channel search for "Renault 18": the first
+        // four videoRenderer entries are genuine matches of decreasing keyword overlap, and a
+        // fifth, wholly unrelated video follows in the very same results section with no
+        // structural marker telling it apart from the real hits.
+        String html = """
+                {"videoRenderer":{"videoId":"gii1I0OU2yI","title":{"runs":[{"text":"Qu\\u00e9 ofreci\\u00f3 Renault en la Expo"}]}}}
+                {"videoRenderer":{"videoId":"TBEHlOSy39A","title":{"runs":[{"text":"Renault 8, Renault 18, Megane RS o Clio Sport"}]}}}
+                {"videoRenderer":{"videoId":"x4K-GtDbAdY","title":{"runs":[{"text":"Thunderbird 90, Grand Marquis, Renault 18, Datsuns"}]}}}
+                {"videoRenderer":{"videoId":"9D0DcpEtMQs","title":{"runs":[{"text":"Renault 8 - Su historia en 1:18"}]}}}
+                {"videoRenderer":{"videoId":"SKJ6OA1qV9Q","title":{"runs":[{"text":"BYD Mini Dolphin - El hatchback el\\u00e9ctrico"}]}}}
+                """;
+
+        assertEquals(
+                List.of("TBEHlOSy39A", "x4K-GtDbAdY", "9D0DcpEtMQs"),
+                ClaudeAgentApp.rankVideoIdsByRelevance(html, "Renault 18", 3));
+        assertEquals(
+                List.of("TBEHlOSy39A", "x4K-GtDbAdY", "9D0DcpEtMQs", "gii1I0OU2yI", "SKJ6OA1qV9Q"),
+                ClaudeAgentApp.rankVideoIdsByRelevance(html, "Renault 18", 5));
+    }
+
+    @Test
+    @DisplayName("rankVideoIdsByRelevance keeps YouTube's own order when nothing matches the query")
+    void rankVideoIdsByRelevanceFallsBackToOriginalOrder() {
+        String html = """
+                {"videoRenderer":{"videoId":"aaaaaaaaaaa","title":{"runs":[{"text":"BYD Mini Dolphin"}]}}}
+                {"videoRenderer":{"videoId":"bbbbbbbbbbb","title":{"runs":[{"text":"Toyota Corolla Cross"}]}}}
+                """;
+
+        assertEquals(
+                List.of("aaaaaaaaaaa", "bbbbbbbbbbb"),
+                ClaudeAgentApp.rankVideoIdsByRelevance(html, "Renault 18", 5));
+    }
+
+    @Test
+    @DisplayName("rankVideoIdsByRelevance keeps only the first title seen for a repeated videoId")
+    void rankVideoIdsByRelevanceDedupesById() {
+        String html = """
+                {"videoRenderer":{"videoId":"aaaaaaaaaaa","title":{"runs":[{"text":"Renault 18"}]}}}
+                {"videoRenderer":{"videoId":"aaaaaaaaaaa","title":{"runs":[{"text":"Renault 18 (recommended)"}]}}}
+                """;
+
+        assertEquals(List.of("aaaaaaaaaaa"), ClaudeAgentApp.rankVideoIdsByRelevance(html, "Renault 18", 5));
+    }
+
+    @Test
+    @DisplayName("rankVideoIdsByRelevance isn't fooled by an id repeated outside its videoRenderer card")
+    void rankVideoIdsByRelevanceIgnoresTitlelessDuplicateIds() {
+        // Captured shape: every card's id also appears in its own "add to queue" watchEndpoint,
+        // with no title anywhere nearby. A naive "nearest title after any videoId" scan latches
+        // the wrong title onto the card whose id happens to repeat, corrupting every pairing after
+        // it — anchoring on the "videoRenderer" prefix must keep each card's title scoped to it.
+        String html = """
+                {"videoRenderer":{"videoId":"aaaaaaaaaaa","title":{"runs":[{"text":"Renault 18 Aaa"}]}},"menu":{"watchEndpoint":{"videoId":"aaaaaaaaaaa"}}}
+                {"videoRenderer":{"videoId":"bbbbbbbbbbb","title":{"runs":[{"text":"Renault 18 Bbb"}]}},"menu":{"watchEndpoint":{"videoId":"bbbbbbbbbbb"}}}
+                """;
+
+        assertEquals(
+                List.of("aaaaaaaaaaa", "bbbbbbbbbbb"),
+                ClaudeAgentApp.rankVideoIdsByRelevance(html, "Renault 18", 5));
     }
 
     private HttpResponse<String> post(String body) throws Exception {
