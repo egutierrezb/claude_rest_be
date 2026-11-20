@@ -29,8 +29,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.UnaryOperator;
@@ -288,7 +292,10 @@ public class ClaudeAgentApp {
         return obj;
     }
 
-    /** Reads the public results page for {@code query} and returns up to {@code limit} distinct video ids. */
+    /**
+     * Reads the public results page for {@code query} and returns up to {@code limit} video ids,
+     * ranked by relevance (see {@link #rankVideoIdsByRelevance}).
+     */
     private static List<String> searchYouTubeTuCocheChannel(String query, int limit) throws IOException, InterruptedException {
         String url = "https://www.youtube.com/@TuCochePorAlex/search?query="
                 + URLEncoder.encode(query, StandardCharsets.UTF_8) + "&sp=" + YT_VIDEOS_ONLY;
@@ -300,12 +307,73 @@ public class ClaudeAgentApp {
                 .build();
 
         HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-        Matcher matcher = VIDEO_ID.matcher(response.body());
-        LinkedHashSet<String> ids = new LinkedHashSet<>();
-        while (matcher.find() && ids.size() < limit) {
-            ids.add(matcher.group(1));
+        return rankVideoIdsByRelevance(response.body(), query, limit);
+    }
+
+    /**
+     * Parses {@code (videoId, title)} pairs out of a channel search results page and returns up
+     * to {@code limit} video ids, most relevant first. YouTube pads out a channel's search
+     * results with other videos from that channel once literal keyword matches run out, mixed
+     * into the very same results section as genuine hits with no structural marker telling them
+     * apart — so titles are scored against the query's words and ties fall back to YouTube's own
+     * order (candidates with no title words in common are pushed to the back rather than trusted
+     * blindly).
+     */
+    static List<String> rankVideoIdsByRelevance(String html, String query, int limit) {
+        List<String> tokens = queryTokens(query);
+
+        // Collect each card's id and the span of page text that belongs to it (up to the next
+        // card, or the end of the page for the last one), then look for that card's title only
+        // within its own span — searching the whole remainder of the page would latch onto a
+        // later, unrelated card's title whenever this card's id repeats without one nearby.
+        List<Integer> cardStarts = new ArrayList<>();
+        List<Integer> cardEnds = new ArrayList<>();
+        List<String> cardVideoIds = new ArrayList<>();
+        Matcher idMatcher = VIDEO_RENDERER_ID.matcher(html);
+        while (idMatcher.find()) {
+            cardVideoIds.add(idMatcher.group(1));
+            cardStarts.add(idMatcher.end());
+            cardEnds.add(idMatcher.start());
         }
-        return new ArrayList<>(ids);
+
+        Map<String, String> titlesByVideoId = new LinkedHashMap<>();
+        for (int i = 0; i < cardVideoIds.size(); i++) {
+            int spanStart = cardStarts.get(i);
+            int spanEnd = (i + 1 < cardVideoIds.size()) ? cardEnds.get(i + 1) : html.length();
+            Matcher titleMatcher = VIDEO_TITLE.matcher(html.substring(spanStart, spanEnd));
+            String title = "";
+            if (titleMatcher.find()) {
+                String rawTitle = titleMatcher.group(1) != null ? titleMatcher.group(1) : titleMatcher.group(2);
+                title = decodeJsonString(rawTitle);
+            }
+            titlesByVideoId.putIfAbsent(cardVideoIds.get(i), title);
+        }
+
+        return titlesByVideoId.entrySet().stream()
+                .sorted(Comparator.<Map.Entry<String, String>>comparingInt(
+                        entry -> relevanceScore(entry.getValue(), tokens)).reversed())
+                .limit(limit)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+
+    /** Lowercased, deduplicated words from a search query, used to score title relevance. */
+    private static List<String> queryTokens(String query) {
+        return Arrays.stream(query.toLowerCase(Locale.ROOT).split("[^\\p{Alnum}]+"))
+                .filter(token -> !token.isBlank())
+                .distinct()
+                .toList();
+    }
+
+    /** Count of {@code tokens} that appear as a substring of {@code title} (case-insensitive). */
+    private static int relevanceScore(String title, List<String> tokens) {
+        String lower = title.toLowerCase(Locale.ROOT);
+        return (int) tokens.stream().filter(lower::contains).count();
+    }
+
+    /** Decodes a JSON string body (the bytes between the quotes) via Gson, escapes and all. */
+    private static String decodeJsonString(String rawJsonStringBody) {
+        return GSON.fromJson("\"" + rawJsonStringBody + "\"", String.class);
     }
 
     /** Best-effort title/author for a video id via YouTube's public oEmbed endpoint. */

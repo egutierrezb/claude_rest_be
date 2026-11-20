@@ -19,8 +19,26 @@ final class ClaudeAgentConstants {
 
     // --- YouTube lookup behind /api/video ---
 
-    /** First {@code "videoId":"XXXXXXXXXXX"} in a YouTube results page is the top hit. */
-    static final Pattern VIDEO_ID = Pattern.compile("\"videoId\":\"([\\w-]{11})\"");
+    /**
+     * The start of a genuine search-result card: {@code "videoRenderer":{"videoId":"..."}. Anchoring
+     * on the {@code videoRenderer} prefix (rather than bare {@code "videoId":"..."}) is required
+     * because the same id reappears elsewhere on the page with no title nearby — e.g. once per
+     * {@code watchEndpoint} in each card's "add to queue" menu — and matching those would pair a
+     * card's id with some other card's title.
+     */
+    static final Pattern VIDEO_RENDERER_ID =
+            Pattern.compile("\"videoRenderer\":\\{\"videoId\":\"([\\w-]{11})\"");
+
+    /**
+     * A card's title, {@code "title":{"runs":[{"text":"..."}]}} or the rarer
+     * {@code "simpleText":"..."} form. Used to rank hits by relevance because YouTube pads channel
+     * search results with unrelated videos once literal keyword matches run out, mixed into the
+     * same results section with no structural marker distinguishing them from genuine hits.
+     */
+    static final Pattern VIDEO_TITLE = Pattern.compile(
+            "\"title\":\\{(?:\"runs\":\\[\\{\"text\":\"((?:[^\"\\\\]|\\\\.)*)\""
+                    + "|\"simpleText\":\"((?:[^\"\\\\]|\\\\.)*)\")",
+            Pattern.DOTALL);
 
     /** {@code sp} filter that restricts a YouTube search to videos only. */
     static final String YT_VIDEOS_ONLY = "EgIQAQ%3D%3D";
